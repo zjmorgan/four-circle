@@ -28,11 +28,11 @@ class Lattice:
 
     def get_axis_angles(self):
 
-        return self.theta, self.phi, self.omega 
+        return self.u_phi, self.u_theta, self.u_omega 
 
     def set_axis_angles(self, values):
 
-        self.theta, self.phi, self.omega = values
+        self.u_phi, self.u_theta, self.u_omega = values
 
     def set_parameters(self, params):
 
@@ -67,6 +67,43 @@ class Lattice:
                 values = np.array(line.split()).astype(float)
                 obs.append(values)
         return np.array(obs).T
+
+    def calculate_UB_from_two_vectors(self, peaks):
+
+        B = self.B_matrix(*self.get_parameters())        
+
+        h, k, l, two_theta, omega, chi, phi = peaks
+
+        hkl_1 = h[0], k[0], l[0]
+        hkl_2 = h[1], k[1], l[1]
+
+        h1c = np.dot(B, hkl_1)
+        h2c = np.dot(B, hkl_2)
+        h3c = np.cross(h1c, h2c)
+
+        t1c = h1c/np.linalg.norm(h1c)
+        t3c = h3c/np.linalg.norm(h3c)
+        t2c = np.cross(t3c, t1c)
+        Tc = np.column_stack([t1c, t2c, t3c])
+        
+        U_phi = np.zeros((3, two_theta.size))
+        U_phi[0,:] = np.cos(omega)*np.cos(chi)*np.cos(phi)-np.sin(omega)*np.sin(phi)
+        U_phi[1,:] = np.cos(omega)*np.cos(chi)*np.sin(phi)+np.sin(omega)*np.cos(phi)
+        U_phi[2,:] = np.cos(omega)*np.sin(chi)
+        
+        h1p = U_phi[:,0]
+        h2p = U_phi[:,1]
+        ang = np.rad2deg(np.arccos(np.dot(h1p, h2p)/(np.linalg.norm(h1p)*np.linalg.norm(h2p))))
+
+        h3p = np.cross(h1p, h2p)
+        t1p = h1p/np.linalg.norm(h1p)
+        t3p = h3p/np.linalg.norm(h3p)
+        t2p = np.cross(t3p, t1p)
+        Tp = np.column_stack((t1p, t2p, t3p))
+        
+        U = Tp @ Tc.T
+
+        self.get_orientation_angles(U)
 
     def get_orientation_angles(self, U):
 
@@ -222,3 +259,6 @@ class Lattice:
             sig_beta = 0
         if np.isclose(gamma, sig_gamma):
             sig_gamma = 0
+
+        self.set_parameters([a, b, c, alpha, beta, gamma])
+        self.set_axis_angles([phi, theta, omega])
