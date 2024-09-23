@@ -90,13 +90,13 @@ class FourCircle:
   
         return U_phi
 
-    def calculate_Q(self, two_theta, omega, chi, phi, lamda):
+    def calculate_scattering_vector(self, two_theta, omega, chi, phi, lamda):
 
         U_phi = self.calculate_U_phi(omega, chi, phi)        
 
-        Q = 2*np.sin(two_theta/2)/lamda*U_phi
+        s = 2*np.sin(two_theta/2)/lamda*U_phi
 
-        return Q
+        return s
 
     def calculate_UB_from_two_vectors(self, peaks):
 
@@ -138,10 +138,10 @@ class FourCircle:
         lamda = self.get_wavelength()
 
         print('Calculated (h,k,l) from observation:')
-        Q = self.calculate_Q(two_theta, omega, chi, phi, lamda)
+        s = self.calculate_scattering_vector(two_theta, omega, chi, phi, lamda)
         for i in range(two_theta.size):
-            h, k, l = UB_inv @ Q[:,i]
-            print('{:8.3f}{:8.3f}{:8.3f}'.format(h,k,l))
+            h, k, l = UB_inv @ s[:,i]
+            print('{:5.3f} {:5.3f} {:5.3f}'.format(h,k,l))
 
         print('\nAngle between the first two reflections is {}'.format(ang))
 
@@ -231,7 +231,7 @@ class FourCircle:
 
         return (a, b, c, alpha, beta, gamma, *params)
 
-    def residual(self, x, hkl, Q, fun):
+    def residual(self, x, hkl, s, fun):
 
         a, b, c, alpha, beta, gamma, phi, theta, omega = fun(x)
 
@@ -240,7 +240,7 @@ class FourCircle:
 
         UB = np.dot(U,B)
 
-        return (np.einsum('ij,jl->il', UB, hkl)-Q).flatten()
+        return (np.einsum('ij,jl->il', UB, hkl)-s).flatten()
 
     def optimize_lattice(self, peaks, cell='Triclinic'):
 
@@ -250,7 +250,7 @@ class FourCircle:
 
         lamda = self.get_wavelength()
 
-        Q = self.calculate_Q(two_theta, omega, chi, phi, lamda)
+        s = self.calculate_scattering_vector(two_theta, omega, chi, phi, lamda)
 
         a, b, c, alpha, beta, gamma = self.get_lattice_parameters()
 
@@ -276,7 +276,7 @@ class FourCircle:
         x0 = x0_dict[cell]
 
         x0 += (phi, theta, omega)
-        args = (hkl, Q, fun)
+        args = (hkl, s, fun)
 
         sol = scipy.optimize.least_squares(self.residual,
                                            x0=x0,
@@ -311,6 +311,33 @@ class FourCircle:
         self.set_lattice_parameters([a, b, c, alpha, beta, gamma])
         self.set_axis_angles([phi, theta, omega])
 
+    def index_peaks(self, peaks):
+
+        h, k, l, two_theta, omega, chi, phi = self.convert_angles(peaks)
+
+        hkl = np.row_stack([h, k, l])
+
+        lamda = self.get_wavelength()
+
+        s = self.calculate_scattering_vector(two_theta, omega, chi, phi, lamda)
+
+        UB = self.UB_matrix()
+        s = UB @ hkl
+        
+        theta = np.zeros(two_theta.size)
+        q = np.linalg.norm(s, axis=0)
+        theta = np.arcsin(lamda*q/2)
+
+        print('\nCalculated angle for new requested')
+        print('(  H,  K,  L), 2theta omega chi phi')            
+        newphi = np.arctan2(s[1,:], s[0,:])
+        newchi = np.arctan2(s[2,:], np.sqrt(s[0,:]**2+s[1,:]**2))
+        newphi[s[0,:] < 0] += np.where(newphi[s[0,:] < 0] > 0, -np.pi, np.pi)
+        fmt = '{:3.0f} {:3.0f} {:3.0f} {:5.2f} {:5.2f} {:5.2f} {:5.2f}'
+        for i in range(q.size):
+            angles = np.rad2deg([2*theta[i], theta[i], newchi[i], newphi[i]])
+            print(fmt.format(hkl[0,i],hkl[1,i],hkl[2,i],*angles))
+
     def azimuthal_scan(self, h, k, l):
 
         hkl = np.array([h, k, l])
@@ -319,19 +346,19 @@ class FourCircle:
 
         # lamda = self.get_wavelength()
 
-        Q = np.dot(UB, hkl)
+        s = UB @ hkl
         # q = np.linalg.norm(Q)
         # theta = np.arcsin(lamda*q/2)
         
-        newphi = np.arctan2(Q[1], Q[0])
+        newphi = np.arctan2(s[1], s[0])
         if newphi > 0:
-            if Q[0] < 0:
+            if s[0] < 0:
                 newphi -= np.pi
         else:
-            if Q[0] < 0:
+            if s[0] < 0:
                 newphi += np.pi
         
-        newchi = np.arctan2(Q[2], np.sqrt(Q[0]**2+Q[1]**2))
+        newchi = np.arctan2(s[2], np.sqrt(s[0]**2+s[1]**2))
         
         phi = newphi
         chi = newchi
