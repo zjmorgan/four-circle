@@ -4,7 +4,7 @@ import scipy.optimize
 import scipy.linalg
 import scipy.spatial
 
-class Lattice:
+class FourCircle:
 
     def __init__(self, filename=None):
 
@@ -141,7 +141,7 @@ class Lattice:
         Q = self.calculate_Q(two_theta, omega, chi, phi, lamda)
         for i in range(two_theta.size):
             h, k, l = UB_inv @ Q[:,i]
-            print('{:5.3f}\t{:5.3f}\t{:5.3f}'.format(h,k,l))
+            print('{:8.3f}{:8.3f}{:8.3f}'.format(h,k,l))
 
         print('\nAngle between the first two reflections is {}'.format(ang))
 
@@ -310,3 +310,61 @@ class Lattice:
 
         self.set_lattice_parameters([a, b, c, alpha, beta, gamma])
         self.set_axis_angles([phi, theta, omega])
+
+    def azimuthal_scan(self, h, k, l):
+
+        hkl = np.array([h, k, l])
+
+        UB = self.UB_matrix()
+
+        # lamda = self.get_wavelength()
+
+        Q = np.dot(UB, hkl)
+        # q = np.linalg.norm(Q)
+        # theta = np.arcsin(lamda*q/2)
+        
+        newphi = np.arctan2(Q[1], Q[0])
+        if newphi > 0:
+            if Q[0] < 0:
+                newphi -= np.pi
+        else:
+            if Q[0] < 0:
+                newphi += np.pi
+        
+        newchi = np.arctan2(Q[2], np.sqrt(Q[0]**2+Q[1]**2))
+        
+        phi = newphi
+        chi = newchi
+        omega = 0
+        
+        R_phi = np.array([[np.cos(phi), np.sin(phi), 0], 
+                          [-np.sin(phi), np.cos(phi), 0],
+                          [0, 0, 1]])
+        
+        R_chi = np.array([[np.cos(chi), 0, np.sin(chi)],
+                          [0, 1, 0], 
+                          [-np.sin(chi), 0, np.cos(chi)]])
+       
+        R_omega = np.array([[np.cos(omega), np.sin(omega), 0],
+                            [-np.sin(omega), np.cos(omega), 0],
+                            [0, 0, 1]])
+        
+        R0 = R_omega @ R_chi @ R_phi
+        
+        psi = np.deg2rad(np.arange(0, 181, 10))
+        
+        print('{:8}{:8}{:8}{:8}'.format('psi', 'chi', 'phi', 'omega'))
+        for i in range(psi.size):
+    
+            R_psi = np.array([[1, 0, 0],
+                              [0, np.cos(psi[i]), np.sin(psi[i])],
+                              [0, -np.sin(psi[i]), np.cos(psi[i])]])
+            
+            R = np.dot(R_psi, R0)
+           
+            psi_ = psi[i]
+            chi_ = np.arctan2(np.sqrt(R[2,0]**2+R[2,1]**2), R[2,2])
+            phi_ = np.arctan2(R[2,1], R[2,0])
+            omega_ = np.arctan2(-R[1,2], R[0,2])
+            angles = np.rad2deg([psi_, chi_, phi_, omega_])
+            print('{:8.3f}{:8.3f}{:8.3f}{:8.3f}'.format(*angles))
