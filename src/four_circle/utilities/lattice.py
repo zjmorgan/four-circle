@@ -6,7 +6,7 @@ import scipy.spatial
 
 class Lattice:
 
-    def __init__(self):
+    def __init__(self, filename=None):
 
         self.a = self.b = self.c = self.alpha = self.beta = self.gamma = None
 
@@ -14,7 +14,11 @@ class Lattice:
 
         self.theta = self.phi = self.omega = None
 
-    def get_parameters(self):
+        if filename is not None:
+
+            self.read_parameters(filename)
+
+    def get_lattice_parameters(self):
 
         return self.a, self.b, self.c, self.alpha, self.beta, self.gamma
 
@@ -28,13 +32,13 @@ class Lattice:
 
     def get_axis_angles(self):
 
-        return self.u_phi, self.u_theta, self.u_omega 
+        return self.u_phi, self.u_theta, self.u_omega
 
     def set_axis_angles(self, values):
 
         self.u_phi, self.u_theta, self.u_omega = values
 
-    def set_parameters(self, params):
+    def set_lattice_parameters(self, params):
 
         self.a, self.b, self.c, self.alpha, self.beta, self.gamma = params
 
@@ -47,13 +51,13 @@ class Lattice:
                 for value in values:
                     params.append(float(value))
                     if len(params) == 6:
-                        self.set_parameters(params)
+                        self.set_lattice_parameters(params)
                     elif len(params) == 7:
-                        self.set_wavelength(value)
+                        self.set_wavelength(float(value))
 
     def write_parameters(self, filename):
 
-        params = self.get_parameters()        
+        params = self.get_lattice_parameters()
 
         with open(filename, 'w') as f:
             line = ' '.join(7*['{:.4f}']).format(*params)
@@ -68,11 +72,37 @@ class Lattice:
                 obs.append(values)
         return np.array(obs).T
 
-    def calculate_UB_from_two_vectors(self, peaks):
-
-        B = self.B_matrix(*self.get_parameters())        
+    def convert_angles(self, peaks):
 
         h, k, l, two_theta, omega, chi, phi = peaks
+
+        omega -= two_theta/2
+
+        two_theta, omega, chi, phi = np.deg2rad([two_theta, omega, chi, phi])
+
+        return h, k, l, two_theta, omega, chi, phi
+
+    def calculate_U_phi(self, omega, chi, phi):
+        
+        U_phi = np.row_stack([np.cos(omega)*np.cos(chi)*np.cos(phi)-np.sin(omega)*np.sin(phi),
+                              np.cos(omega)*np.cos(chi)*np.sin(phi)+np.sin(omega)*np.cos(phi),
+                              np.cos(omega)*np.sin(chi)])
+  
+        return U_phi
+
+    def calculate_Q(self, two_theta, omega, chi, phi, lamda):
+
+        U_phi = self.calculate_U_phi(omega, chi, phi)        
+
+        Q = 2*np.sin(two_theta/2)/lamda*U_phi
+
+        return Q
+
+    def calculate_UB_from_two_vectors(self, peaks):
+
+        B = self.B_matrix(*self.get_lattice_parameters())
+
+        h, k, l, two_theta, omega, chi, phi = self.convert_angles(peaks)
 
         hkl_1 = h[0], k[0], l[0]
         hkl_2 = h[1], k[1], l[1]
@@ -85,12 +115,9 @@ class Lattice:
         t3c = h3c/np.linalg.norm(h3c)
         t2c = np.cross(t3c, t1c)
         Tc = np.column_stack([t1c, t2c, t3c])
-        
-        U_phi = np.zeros((3, two_theta.size))
-        U_phi[0,:] = np.cos(omega)*np.cos(chi)*np.cos(phi)-np.sin(omega)*np.sin(phi)
-        U_phi[1,:] = np.cos(omega)*np.cos(chi)*np.sin(phi)+np.sin(omega)*np.cos(phi)
-        U_phi[2,:] = np.cos(omega)*np.sin(chi)
-        
+
+        U_phi = self.calculate_U_phi(omega, chi, phi)
+
         h1p = U_phi[:,0]
         h2p = U_phi[:,1]
         ang = np.rad2deg(np.arccos(np.dot(h1p, h2p)/(np.linalg.norm(h1p)*np.linalg.norm(h2p))))
@@ -100,12 +127,25 @@ class Lattice:
         t3p = h3p/np.linalg.norm(h3p)
         t2p = np.cross(t3p, t1p)
         Tp = np.column_stack((t1p, t2p, t3p))
-        
+
         U = Tp @ Tc.T
 
-        self.get_orientation_angles(U)
+        self.set_orientation_angles(U)
 
-    def get_orientation_angles(self, U):
+        UB = self.UB_matrix()
+        UB_inv = np.linalg.inv(UB)
+
+        lamda = self.get_wavelength()
+
+        print('Calculated (h,k,l) from observation:')
+        Q = self.calculate_Q(two_theta, omega, chi, phi, lamda)
+        for i in range(two_theta.size):
+            h, k, l = UB_inv @ Q[:,i]
+            print('{:5.3f}\t{:5.3f}\t{:5.3f}'.format(h,k,l))
+
+        print('\nAngle between the first two reflections is {}'.format(ang))
+
+    def set_orientation_angles(self, U):
 
         omega = np.arccos((np.trace(U)-1)/2)
 
@@ -116,7 +156,7 @@ class Lattice:
         theta = np.arccos(uz)
         phi = np.arctan2(uy, ux)
 
-        return phi, theta, omega
+        self.set_axis_angles([phi, theta, omega])
 
     def U_matrix(self, phi, theta, omega):
 
@@ -144,8 +184,8 @@ class Lattice:
 
     def UB_matrix(self):
 
-        B = self.B_matrix(*self.get_parameters())
-        U = self.U_matrix(*self.get_orientation())
+        B = self.B_matrix(*self.get_lattice_parameters())
+        U = self.U_matrix(*self.get_axis_angles())
 
         return np.dot(U, B)
 
@@ -200,13 +240,21 @@ class Lattice:
 
         UB = np.dot(U,B)
 
-        return (np.einsum('ij,lj->li', UB, hkl)*2*np.pi-Q).flatten()
+        return (np.einsum('ij,jl->il', UB, hkl)-Q).flatten()
 
-    def optimize_lattice(self, cell='Triclinic'):
+    def optimize_lattice(self, peaks, cell='Triclinic'):
+
+        h, k, l, two_theta, omega, chi, phi = self.convert_angles(peaks)
+
+        hkl = np.row_stack([h, k, l])
+
+        lamda = self.get_wavelength()
+
+        Q = self.calculate_Q(two_theta, omega, chi, phi, lamda)
 
         a, b, c, alpha, beta, gamma = self.get_lattice_parameters()
 
-        phi, theta, omega = self.get_orientation_angles()
+        phi, theta, omega = self.get_axis_angles()
 
         fun_dict = {'Cubic': self.cubic,
                     'Rhombohedral': self.rhombohedral,
@@ -228,7 +276,7 @@ class Lattice:
         x0 = x0_dict[cell]
 
         x0 += (phi, theta, omega)
-        args = (self.hkl, self.Q, fun)
+        args = (hkl, Q, fun)
 
         sol = scipy.optimize.least_squares(self.residual,
                                            x0=x0,
@@ -260,5 +308,5 @@ class Lattice:
         if np.isclose(gamma, sig_gamma):
             sig_gamma = 0
 
-        self.set_parameters([a, b, c, alpha, beta, gamma])
+        self.set_lattice_parameters([a, b, c, alpha, beta, gamma])
         self.set_axis_angles([phi, theta, omega])
