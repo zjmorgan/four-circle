@@ -1,4 +1,4 @@
-import re
+import os
 import numpy as np
 
 import scipy.optimize
@@ -539,94 +539,380 @@ class FourCircle:
         else:
             return table
 
-    def read_spice_file(self, filepath):
-        data_dict = {"metadata": {}, "data": {}}
-        column_headers = []
-        data_section = False
-    
-        with open(filepath, 'r') as file:
-            for line in file:
-                line = line.strip()
-    
-                # Parse comments and extract metadata
-                if line.startswith("#"):
-                    # Extract key-value pairs from comments using regex
-                    match = re.match(r"#\s*(\w+)\s*=\s*(.*)", line)
-                    if match:
-                        key, value = match.groups()
-                        # Convert value to appropriate type (float, int, or string)
-                        try:
-                            value = float(value)
-                        except ValueError:
-                            pass
-                        data_dict["metadata"][key.strip()] = value
-    
-                    # Detect column headers
-                    if line.startswith("# col_headers"):
-                        column_headers = next(file).strip().split()
-                        data_dict["data"] = {header: [] for header in column_headers}
-                        data_section = True
-    
-                elif data_section and line and not line.startswith("#"):
-                    # Parse the data lines into the data dictionary
-                    values = line.split()
-                    for header, value in zip(column_headers, values):
-                        try:
-                            value = float(value)
-                        except ValueError:
-                            pass
-                        data_dict["data"][header].append(value)
-    
-        return data_dict
+    def load_spice_data(self, filename):
 
-    def sigma_clip(self, array, sigma=3, maxiters=3):
-        array = np.array(array, dtype=float)
-        y = array[np.isfinite(array)]
-        mask = np.ones_like(y, dtype=bool)
+        content = self.spice_data(filename)
 
-        for _ in range(maxiters):
-            data = y[mask]
+        data, headertext, headers, \
+        defxname, defyname, defxvalue, defyvalue = content
 
-            med = np.median(data)
-            mad = scipy.stats.median_abs_deviation(data, scale="normal")
+        ycol = headers.index('detector')
+        theta2col = headers.index('s2')
+        omegacol = headers.index('s1')
+        chicol = headers.index('chi')
+        phicol = headers.index('phi')
+        moncol = headers.index('monitor')
+        tempcol = headers.index('tsample')
 
-            if mad <= 0:
-                break
+        y = data[ycol,:]
+        two_theta = data[theta2col,:]
+        omega = data[omegacol,:]
+        chi = data[chicol,:]
+        phi = data[phicol,:]
+        monitor = data[moncol,:]
+        temp = data[tempcol,:]
 
-            dev = np.abs(y - med)
-            new_mask = dev < (sigma * mad)
+        err = np.sqrt(y)
 
-            if np.all(new_mask == mask):
-                break
+        y = y.flatten()
+        err = err.flatten()
+        two_theta = two_theta.flatten()
+        omega = omega.flatten()
+        chi = chi.flatten()
+        phi = phi.flatten()
+        monitor = monitor.flatten()
+        temp = temp.flatten()
 
-            mask = new_mask.copy()
+        err[err == 0] = 1
 
-        data = y[mask]
-        med = np.median(data)
-        mad = scipy.stats.median_abs_deviation(data, scale="normal")
+        data = np.column_stack([two_theta, omega, chi, phi, monitor, y, err, temp])
 
-        return med, mad
+        xlab = str(defxname)
+        ylab = str(defyname)
 
-    def estimate_peak_width(self, x, y, e):
+        return data, xlab, ylab
+
+    def spice_data(self, filename):
+
+        with open(filename, 'r') as f:
+            data = []
+            headertext = ''
+            headers = []
+            colcounter = False
+            ncols = -1
+            defxname = ''
+            defyname = ''
+
+            for line in f:
+                commenttest = line.strip().split()
+
+                if commenttest and commenttest[0] == '#':
+                    if 'def_x' in commenttest:
+                        defxname = commenttest[3]
+                    if 'def_y' in commenttest:
+                        defyname = commenttest[3]
+
+                    if 'col_headers' in commenttest:
+                        colcounter = True
+                    elif colcounter:
+                        headers = commenttest[1:]
+                        colcounter = False
+
+                    headertext += line
+
+                else:
+                    try:
+                        tstring = np.array([float(x) for x in commenttest])
+                    except ValueError:
+                        continue
+
+                    if ncols == -1:
+                        ncols = len(tstring)
+                        data.append(tstring)
+                    else:
+                        if len(tstring) == ncols:
+                            data.append(tstring)
+                        elif len(tstring) > ncols:
+                            data.append(tstring[:ncols])
+                        else:
+                            ncols = len(tstring)
+                            data = [row[:ncols] for row in data]
+                            data.append(tstring)
+
+        data = np.array(data).T
+
+        try:
+            defxvalue = headers.index(defxname)
+            defyvalue = headers.index(defyname)
+        except ValueError:
+            defxvalue = None
+            defyvalue = None
+
+        content = data, headertext, headers, \
+                  defxname, defyname, defxvalue, defyvalue
+
+        return content
+
+    def estimate_peak_width(self, x, y, err):
+
+        x = np.asarray(x).flatten()
+        y = np.asarray(y).flatten()
+        err = np.asarray(err).flatten()
+
+        data = np.column_stack((x, y, err))
+        newdata = data[data[:, 0].argsort()]
+        x = newdata[:, 0]
+        y = newdata[:, 1]
+        err = newdata[:, 2]
+
+        data1 = np.column_stack((x, y))
+        newdata = data1[data1[:,1].argsort()]
+        y1 = np.sort(newdata[:,1])
+        idx1 = round(len(y)/11)
+        idx2 = round(len(y)/4)
+        newx = newdata[idx1:idx2,0]
+        newy = newdata[idx1:idx2,1]
+
+        pin1 = np.polynomial.Polynomial.fit(newx, newy, deg=0)
+        bkgrnd = np.mean(newy)
         slope = 0
 
-        bkgrnd = self.sigma_clip(y)
+        y = y-(slope*x+bkgrnd)
 
-        w = y - bkgrnd
+        dx = np.diff(x, prepend=x[0], append=x[-1])
+        totarea = np.dot(dx, y)
+        maxx = np.max(x)
+        minx = np.min(x)
+        av = totarea/(maxx-minx)
+        xcom = np.mean(x)
 
-        area = np.nansum(w) * np.diff(x).mean()
+        x2 = x[2:-2]
+        y2 = y[2:-2]
+        center = np.sum(x2*y2)/np.sum(y2)
+        moment2 = np.sum((x2-center)**2*y2)/np.sum(y2)
+        sigma = np.sqrt(moment2)*1.50
 
-        w[w < 0] = 0
-        w *= w
+        idx = np.where(x <= center)[0]
+        if len(idx) > 1 and len(idx) < len(x):
+            ypeak = np.mean(y[len(idx)-1:len(idx)+2])
+        else:
+            ypeak = y[len(idx)]
 
-        wgt = np.nansum(w)
+        peak = ypeak-av
 
-        center = np.nansum(x * w) / wgt
-        width = np.nansum( (x - center) ** 2 * w) / wgt
+        newidx = np.where(y < av)[0]
+        peakarea = totarea-np.dot(dx[newidx], y[newidx])*0.5
+        area = peakarea*1.1
+
+        width = sigma
+
+        y3 = np.sort(y)
+        newypeak = np.mean(y3[-3:])
+
+        stdbk = np.std(y3[round(len(y)*0.10):round(len(y) * 0.35)])
+        range_ = (maxx-minx) / 4.5
+        centeridx = np.where(np.abs(x-center) < 0.20*range_)[0]
+        peakheight = np.mean(y[centeridx])
+
+        idx1 = np.where(np.abs(x-center) <= range_)[0]
+        idx2 = np.where(np.abs(x-center) >= range_)[0]
+        sigy = y[idx1]
+        bky = y[idx2]
+
+        ratio1 = np.std(sigy)/np.std(bky)
+        ratio2 = peakheight/stdbk
+
+        if ratio2 > 4 and np.abs(center-xcom) < 0.3:
+            pass
+        else:
+            area = 0
+            width = 2.5
 
         return bkgrnd, slope, area, center, width
 
-    def profile(self, x, bkgrnd, slope, area, center, width):
+
+    def gas_full(self, x, bkgrnd, slope, area, center, width):
 
         return bkgrnd+slope*(x-center)+area*np.exp(-((x-center)**2)/(2*width**2))
+
+    def fit_peaks(self, scan_numbers, IPTS, exp, mcu=1):
+
+        UB = self.UB_matrix()
+        inv_UB = np.linalg.inv(UB)
+
+        lamda = self.get_wavelength()
+        chi0 = 0
+
+        data_ub_refine = []
+        data_struct_refine = []
+
+        dirname = '/HFIR/{}/IPTS-{}/exp{}/Datafiles/'.format(self.instrument, IPTS, exp)
+
+        for scannum in scan_numbers:
+
+            fname = '{}_exp{}_scan{:04d}.dat'.format(self.instrument, exp, scannum)
+
+            filename = os.path.join(dirname, fname)
+
+            data = self.load_spice_data(filename)
+            scanned_var = np.std(data[:,0:4], axis=0)
+            # scanned_var = 1
+
+            two_theta = -np.deg2rad(data[:,0])
+            omega = -np.deg2rad(data[:,1]-data[:,0]/2)
+            chi = np.deg2rad(data[:,2]-chi0)
+            phi = np.deg2rad(data[:, 3])
+
+            x = data[:,scanned_var]
+            monitor = np.sort(data[:,4])[2:-2]
+            monitorave = np.mean(monitor)
+            ratio = monitorave/mcu
+            y = data[:,5]/ratio
+            err = data[:,6]/ratio
+
+            theta2ave = np.mean(two_theta)
+            omegaave = np.mean(omega)
+            chiave = np.mean(chi)
+            phiave = np.mean(phi)
+
+            U1 = np.cos(omegaave)*np.cos(chiave)*np.cos(phiave)-np.sin(omegaave)*np.sin(phiave)
+            U2 = np.cos(omegaave)*np.cos(chiave)*np.sin(phiave)+np.sin(omegaave)*np.cos(phiave)
+            U3 = np.cos(omegaave)*np.sin(chiave)
+            U = np.array([U1, U2, U3])
+            save = 2*np.sin(theta2ave/2)/lamda*U
+            hkl = inv_UB @ save
+
+            have, kave, lave = np.round(hkl, 3)
+
+            bkgrnd, slope, area, center, width = self.estimate_peak_width(x, y, err)
+
+            initial_guess = [bkgrnd, slope, area, center, width]
+            try:
+                popt, pcov = scipy.optimize.curve_fit(self.gas_full, x, y, sigma=err, p0=initial_guess)
+                perr = np.sqrt(np.diag(pcov))
+            except RuntimeError:
+                popt, perr = initial_guess, [0]*len(initial_guess)
+
+            bestpa = popt
+            bestdpa = perr
+
+            intensity = bestpa[2]*np.sin(theta2ave)
+            interr = bestdpa[2]*np.sin(theta2ave)
+            width = abs(bestpa[4])
+            widtherr = bestdpa[4]
+
+            dxave = np.mean(np.diff(x))
+            center = bestpa[3]-dxave / 2
+            theta2ave = center
+
+            plt.figure(1)
+            plt.errorbar(x, y, yerr=err, fmt='ro')
+            x_fit = np.linspace(min(x), max(x), len(x)*4)
+            y_fit = self.gas_full(x_fit, *bestpa)
+            plt.plot(x_fit, y_fit, 'k-')
+            plt.title('Scan #{} ({},{},{})'.format(scannum,have,kave,lave))
+            plt.xlabel('omega (degree)')
+            plt.ylabel('counts')
+            plt.show()
+
+            angles = np.rad2deg([theta2ave, omegaave, chiave, phiave])
+            theta2ave = np.rad2deg(theta2ave)
+
+            data_ub_refine.append([have, kave, lave, *angles])
+            data_struct_refine.append([scannum, have, kave, lave, theta2ave, intensity, interr, width, widtherr])
+
+        return data_ub_refine, data_struct_refine
+
+    def generate_scan_macro(self, table, title, max_time, min_time=1,
+                                  struct_ref=False, angle_rel_dur=[1,1,1], 
+                                  two_theta0=0, omega0=0, chi0=0, phi0=0):
+
+        UB = self.UB_matrix()
+        B = self.B_matrix()
+
+        lamda = self.get_wavelength()
+
+        h, k, l, d, F2, two_theta, omega, chi, phi = table
+
+        mask = self.prune_unreachable_settings(two_theta, omega, chi, phi)
+
+        h, k, l, d, F2, two_theta, omega, chi, phi = table[mask]
+        
+        sort = self.greedy_sort()
+
+        totaltime = 0
+
+        delta_t = max_time-min_time
+
+        F2 += 0.001
+        F2_min, F2_max = np.min(F2), np.max()
+
+        for i in sort:
+
+            print('scantitle "{}: ({} {} {})"\n'.format(title,h[i],k[i],l[i]))
+
+            interp = (np.log10(F2[i])-np.log10(F2_min))/(np.log10(F2_max)-np.log10(F2_min))
+                  
+            roundtime = max_time-round()
+                                      /*delta_t)
+    
+        diff = [abs(theta2[i] - temp[0]), abs(newchi[i] - temp[1]), abs(newphi[i] - temp[2])]
+        time = np.multiply(diff, rate)
+        overhead = max(time) + 77
+    
+            totaltime += roundtime * (round(2 * srange / 0.12) + 1) * 1.2
+
+        # Moving s2, s1, chi, phi
+        comment = f'mv s2 {(-newtheta2[i]):.2f} s1 {(-newomega[i]):.2f} chi {newchi[i]:.2f} phi {newphi[i]:.2f}'
+        foutid.write(f'{comment}\n')
+
+        # Scan commands for s1 and chi
+        foutid.write('scan s1 @(s1)+1.5 @(s1)-1.5 0.15; drive s1 @(com)\n')
+        foutid.write('scan chi @(chi)+5 @(chi)-5 1; drive chi @(com)\n')
+
+        # th2th scan
+        foutid.write('th2th 2 -2 0.2\n')
+
+        print('Total hours needed: {:.2f}'.format(totaltime/3600))
+
+import numpy as np
+import math
+
+# Initialize variables
+rate = [45/50, 42/40, 340/270]
+temp = [0, 0, 0]
+maxt = 100  # Adjust this to your desired maximum time
+mint = 10  # Adjust this to your minimum time
+minint = 0.01  # Minimum intensity
+maxint = 100.0  # Maximum intensity
+
+# Simulated arrays for newh, newk, newl, newtheta2, newomega, newchi, newphi, newint, theta2
+newh = np.array([1.0, 2.0, 3.0])
+newk = np.array([1.0, 2.0, 3.0])
+newl = np.array([1.0, 2.0, 3.0])
+newtheta2 = np.array([10.0, 20.0, 30.0])
+newomega = np.array([5.0, 15.0, 25.0])
+newchi = np.array([2.0, 4.0, 6.0])
+newphi = np.array([1.0, 3.0, 5.0])
+newint = np.array([50.0, 60.0, 70.0])
+theta2 = np.array([12.0, 22.0, 32.0])
+
+srange = 1.5
+totaltime = 0
+
+# Simulate the file writing process
+with open('output.txt', 'w') as foutid:
+
+    for i in range(len(newh)):
+        comment = f'scantitle "Incommensurate_k1_@({temp[0]}K_2axis: ({newh[i]:4.2f} {newk[i]:4.2f} {newl[i]:4.2f})")'
+        foutid.write(f"{comment}\n")
+
+        comment = f'mv s2 {newtheta2[i]:.2f} s1 {(-newomega[i] + srange):.2f} chi {newchi[i]:.2f} phi {newphi[i]:.2f}'
+        foutid.write(f"{comment}\n")
+
+        diff = [abs(theta2[i] - temp[0]), abs(newchi[i] - temp[1]), abs(newphi[i] - temp[2])]
+        time = np.multiply(diff, rate)
+        overhead = max(time) + 77
+
+
+
+        comment = f'scan s1 {(-newomega[i] + srange):.2f} {(-newomega[i] - srange):.2f} 0.15'
+        foutid.write(f"{comment}\n")
+
+        totaltime += roundtime * (round(2 * srange / 0.15) + 1) * 1.2 + overhead
+
+        temp = [theta2[i], newchi[i], newphi[i]]
+
+# Final print statement
+print(f"Total hours needed: {totaltime / 60 / 60:.2f}")
 
